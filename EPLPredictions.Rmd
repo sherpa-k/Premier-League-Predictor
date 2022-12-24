@@ -1,0 +1,201 @@
+---
+title: "2018-19 Premier League Prediction, DA5030 Final"
+author: "Kalsang Sherpa"
+output:
+  github_document:
+    df_print: paged
+---
+
+#### Required packages
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(psych)
+library(randomForest)
+library(class)
+library(e1071)
+library(gmodels)
+library(ROSE)
+library(scutr)
+```
+
+### **Business Understanding**
+Sports betting and gambling is a very data-driven profession and activity. It requires the use of probabilities and statistics for people to interpret and make predictions about the outcomes of matches and player performances. Soccer, otherwise known as football, is one of the world's most popular sports and is a sport where millions of people make bets on every day. Therefore, we decided to build a predictive model that predicts the outcome of matches in the English Premier League over the 2018-19 season. 
+
+
+### **Data Understanding**
+Below we loaded in the data for the English Premier League 2018-19 season and the dictionary of features, which we will be looking at time to time. The tibble contains 380 observation with 62 variables. Given that there are 20 teams that all face each other twice a season and since you can't play yourself, 380 observations seems include every possible match in the season. The data set however does seem to contain a bit of redundant and unnecessary features that we will probably be removing.
+
+Looking at the data there is no missing data, and the data seems to be clean and neat, however there is quite a few features that we will not be using. Looking at the dictionary a lot of the features in the data set are betting odds which we won't use since it would make the reliant too dependent on those features. Lastly looking at the features we can also see that a vast majority of our features are numeric.
+
+In most sport scenarios, there is a slight morale advantage to the home team. Here we checked it out by looking at the total home goals vs away goals, in which the home team outscored the away team 596 goals to 476. In these games 181(47.63%) times the home team won, 128(33.68%) the away team won and 71(18.68%) times both teams drew. In the overlapping density plot we can see that the peaks for the goals scored by the home team are higher than the away team and the minimums are lower than the away team. Also 60% of the total games had the same half time and full time result, giving us a correlation of 0.6298 between the two.
+
+Looking at the distribution of full time home and away goals the data seems to be skewed more to the right. In real life more often than not soccer games are not shoot outs with teams rapidly scoring on both ends so it makes sense that the distribution would favor the mode being greater than the mean. However for home shots and away shots, they both seem to display a normal distribution. There also doesn't seem to be much correlation between these features. Lastly we also looked at the proportion of full time results, in almost half the games, the home side ended up with the win, whereas an underwhelming 18.7% of games ended in a draw.
+```{r, warning=FALSE, message=FALSE}
+# load data and data dictionary.
+prem.dat <- read_csv("EPL1819.csv")
+prem.dict <- read.delim("EPLdictionary.txt", sep = "=")
+
+# Look at the data types. 
+glimpse(prem.dat)
+
+# Check for missing data.
+sum(is.na(prem.dat))
+
+# Home vs Away
+sum(prem.dat$FTHG)
+sum(prem.dat$FTAG)
+
+# Get number of games where home team drew, won and lost against the away team.
+nrow(prem.dat[prem.dat$FTHG == prem.dat$FTAG,])
+nrow(prem.dat[prem.dat$FTHG > prem.dat$FTAG,])
+nrow(prem.dat[prem.dat$FTHG < prem.dat$FTAG,])
+
+# Get the percent of times where half time result was the same as the full time result.
+nrow(prem.dat[prem.dat$FTR == prem.dat$HTR,]) / 380
+cor(as.numeric(as.factor(prem.dat$FTR)), as.numeric(as.factor(prem.dat$HTR)))
+
+# distribution of home goals vs away goals 
+prem.dat %>%
+  pivot_longer(cols = c('FTHG', 'FTAG'), names_to = "HA", values_to = "Goals") %>%
+  ggplot(aes(x = Goals, fill = HA)) + 
+    geom_density(alpha = 0.2) +
+    labs(xlab = "Goals Scored", ylab = "Density", title = "Density of Goals Scored") +
+    scale_fill_discrete(name = "Side", labels = c("Away Team", "Home Team"))
+
+# Use home goals and home team shots too look at shots to goals and wins to losses graph.
+ggplot(data = prem.dat, aes(x = FTHG, y = HS, shape = FTR)) +
+  geom_point(aes(color = FTR))
+
+# View correlation of full time goals, shots taken by both teams.
+pairs.panels(subset(prem.dat, select = c(FTHG, FTAG, HS, AS)))
+
+prop.table(table(prem.dat$FTR)) * 100
+
+cor(as.numeric(as.factor(prem.dat$FTR)), as.numeric(as.factor(prem.dat$HTR)))
+```
+
+### **Data Preparation**
+With a better understanding of the data set, now we will begin preparing the data. Every feature from column 24 to 62, we will remove since they are probabilities generated from other sports betting sites and it would heavily affect our model. This now makes our last feature of the data set AR(Away Team Red Cards). Next we removed the division, data and referee. All three of these features are encoded as characters, division is the same value for all observations since all teams are in the same league, date did not seem to be a compelling feature and referee seems obsolete since we have the amount of yellow and red cards given as a feature. Home Team and Away Team names were also removed since we plan on only using match stats to make predictions and will not be using previous assumptions about the team.
+
+We also have to change the values of HTR to numeric values. We have 3 possible values for both which is `r unique(prem.dat$FTR)`. We will turn them into 0 for A, 1 for D and 2 for H. Full time away goals and Full time home goals will also be removed. Although they are both numeric values, they explain the data too well since FTHG and FTAG would tell our model the winner of the match without the need for any other feature. 
+
+As for normalization and outlier removal, we did not do either of them since the range of values for all numeric features were all reasonably close and the values were all discrete. I kept the outliers because I felt it was necessary for the data set since in sports sometimes teams do have one-sided victories, especially when facing a weaker opponent.   
+
+```{r}
+# Remove features
+prem.dat <- prem.dat[,1:23] %>%
+  select(-Div, -Date, -Referee, -HomeTeam, -AwayTeam)
+
+# Change full time and half time results to numeric.
+prem.dat[prem.dat$HTR == "A",]$HTR <- "0"
+prem.dat[prem.dat$HTR == "D",]$HTR <- "1"
+prem.dat[prem.dat$HTR == "H",]$HTR <- "2"
+
+prem.dat$HTR <- as.numeric(prem.dat$HTR)
+
+# Remove FTHG and FTAG
+prem.dat <- prem.dat %>%
+  select(-FTHG, -FTAG)
+
+# Shuffle and split the data.
+set.seed(2022)
+shuffle <- runif(nrow(prem.dat))
+prem.dat <- prem.dat[order(shuffle),]
+
+prem.train <- prem.dat[1:285,]
+prem.test <- prem.dat[286:380,]
+
+# Create labels.
+label.train <- as.factor(prem.dat$FTR[1:285])
+label.test <- as.factor(prem.dat$FTR[286:380])
+```
+
+### **Modeling**
+Below we created our three models : A Random Forest, k-Nearest Neighbors algorithm and Support Vecotr Machine. I chose these models because I thought they would be best for classification. 
+```{r}
+# Random Forest Model
+rf.model <- randomForest(as.factor(FTR) ~ ., data = prem.train)
+
+# k-NN algorithm.
+knn.pred <- knn(train = prem.train[,-1], test = prem.test[,-1], cl = label.train, k = 20 )
+
+# Support Vector Machine.
+svm.model <- svm(as.factor(FTR) ~., data = prem.train, kernel = "linear", type = "C-classification")
+```
+
+### **Evaluation**
+First, we looked at the random forest model which we set to use 500 trees, the default. It had an out of bag estimate of error rate of 34.04% meaning nearly 66 % of our observations were correctly predicted. This means our model does not seem like the most accurate model and as we can see most of the errors came in predicting the draws, having a class error rate of 86.8%. When using it to predict the testing data, we see that our model predicted 65.26% of the matches correctly. A reoccurring theme seems to be the models inability to accurately predict draws. Our model predicted 66% of the away team wins correctly and 85% of the home wins correctly, however for draws it was only 16.7% correct.
+
+Next, we looked at the predictions we drew with our knn algorithm which by default used a euclidean distance formula. We see that overall our accuracy was 63%. Similar to the random forest model, the accuracy for determining if a match was a draw was much lower. With the knn algorithm we were only able to correctly predict one match as a draw out of the 18 total draws that occurred. 
+
+Lastly, we used a support vector machine to classify the matches and we had similar results here too. In total there were 163 support vectors used and the model accuracy came out to be 66.32%. Here as well the accuracy for predicting draws was extremely low with a 11.11% accuracy. 
+
+In order to try and fix the accuracy, one option we looked at was balancing the data. Since we had a multi-class response variable we used SCUT from the scutr package to balance the training data. After doing so all three classes had an equal proportion of 33.33% each. However when creating the three models again on the new training data set, we didn't see an increase in accuracy instead however, we saw a decrease in the overall accuracy of the new model in comparison to the previous one. 
+
+We also built an ensemble that took a vote of all 3 models for the classification of the matches which had an accuracy of 65.26%. 
+
+```{r}
+# Random Forest Model evaluation
+rf.model
+rf.pred <- predict(rf.model, newdata = prem.test, type= "class")
+CrossTable(x = label.test, y = rf.pred, prop.chisq = FALSE)
+
+# KNN evaluation.
+CrossTable(x = label.test, y = knn.pred, prop.chisq = FALSE)
+
+# SVM evaluation.
+svm.model
+svm.pred <- predict(svm.model, newdata = prem.test)
+CrossTable(x = label.test, y = svm.pred, prop.chisq = FALSE)
+
+prop.table(table(prem.train$FTR))
+
+# Create class balance.
+balanced.train <- SCUT(prem.train, "FTR")
+prop.table(table(balanced.train$FTR))
+
+# Random Forest Model
+rf.model2 <- randomForest(as.factor(FTR) ~ ., data = balanced.train)
+
+# k-NN algorithm.
+knn.pred2 <- knn(train = balanced.train[,-1], test = prem.test[,-1], cl = as.factor(balanced.train$FTR), k = 20 )
+
+# Support Vector Machine.
+svm.model2 <- svm(as.factor(FTR) ~., data = balanced.train, kernel = "linear", type = "C-classification")
+
+rf.model2
+rf.pred2 <- predict(rf.model2, newdata = prem.test, type= "class")
+CrossTable(x = label.test, y = rf.pred2, prop.chisq = FALSE)
+
+# KNN evaluation.
+CrossTable(x = label.test, y = knn.pred2, prop.chisq = FALSE)
+
+# SVM evaluation.
+svm.model2
+svm.pred2 <- predict(svm.model2, newdata = prem.test)
+CrossTable(x = label.test, y = svm.pred2, prop.chisq = FALSE)
+
+# Create an ensemble 
+ensemble <- tibble(rf.pred, knn.pred, svm.pred)
+
+# Get the mode of each observation
+ensemble$vote <- apply(ensemble[], 1, function(x) {names(which.max(table(factor(x,unique(x)))))})
+CrossTable(x = label.test, y = ensemble$vote, prop.chisq = FALSE)
+
+# store the accuracy of each model in a tibble.
+rf.acc <- "65.26%"
+knn.acc <- "63.16%"
+svm.acc <- "66.36%"
+ensemble.acc <- "65.26%"
+rf.acc2 <- "60.00%"
+knn.acc2 <- "45.26%"
+svm.acc2 <- "62.11%"
+
+accuracy <- tibble(rf.acc, knn.acc, svm.acc, ensemble.acc, rf.acc2, knn.acc2, svm.acc2 )
+accuracy 
+
+```
+
+### **Results**
+In the end, out of the three models, it seems that the support-vector machine performed the best, however by only a small margin. Most of the inaccuracy for all three models came from the inability to properly predict draws. Out of our 380 observations it seems that only 71 of them were draws and we guessed that the low proportion might have been the reason why it was inaccurate in predicting draws. However, when balancing out the three classes to have proportions of 33% each, the three models did not improve, rather the overall accuracy in the model decreased instead. I believe that soccer is a very volatile sport where even if one team is dominating the other in terms of shots, shots on target, number of corners, etc. the other team can still end up winning or drawing the match with a single counter-attacking goal. We also did not use any assumptions about the teams playing, meaning that our models did not take into account the ranks/ratings of the teams playing. Therefore, there were no added weights or advantages to the stronger teams in our models. However, overall our model ensemble had an accurcay of 65.26% which seemed to be decent and if you were to compute the ability of the ensemble to predict just home or away wins, it had an accuracy of 79.22%.
