@@ -1,0 +1,168 @@
+---
+title: "R Notebook"
+output:
+  github_document:
+    df_print: paged
+---
+
+
+#### Required packages
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(randomForest)
+library(gmodels)
+library(ggrepel)
+```
+
+### **Business Understanding**
+Sports betting and gambling is a very data-driven profession and activity. It requires the use of probabilities and statistics for people to interpret and make predictions about the outcomes of matches and player performances. Soccer, otherwise known as football, is one of the world's most popular sports and is a sport where millions of people make bets on every day. Therefore, we decided to build a predictive model that predicts the outcome of matches in the English Premier League over the 2018-19 season using the data found here: https://datahub.io/sports-data/english-premier-league/r/0.html.
+
+
+### **Data Understanding**
+Below we loaded in the data for the English Premier League 2018-19 season and the dictionary of features, which we will be looking at time to time. The tibble contains 380 observation with 62 variables. Given that there are 20 teams that all face each other twice a season and since you can't play yourself, 380 observations seems include every possible match in the season. The data set however does seem to contain a bit of redundant and unnecessary features that we will probably be removing.
+
+Looking at the data there is no missing data, and the data seems to be clean and neat, however there is quite a few features that we will not be using. Looking at the dictionary a lot of the features in the data set are betting odds which we won't use since it would make the reliant too dependent on those features. Lastly looking at the features we can also see that a vast majority of our features are numeric.
+
+In most sport scenarios, there is a slight morale advantage to the home team. Here we checked it out by looking at the total home goals vs away goals, in which the home team outscored the away team 596 goals to 476. In these games 181(47.63%) times the home team won, 128(33.68%) the away team won and 71(18.68%) times both teams drew. In the overlapping density plot we can see that the peaks for the goals scored by the home team are higher than the away team and the minimums are lower than the away team. Also 60% of the total games had the same half time and full time result, giving us a correlation of 0.6298 between the two.
+
+We can also see the total amount of goals scored for each club compared to the amount they allowed, which describes the goal difference for the season. In the next scatter plot we can see just how well the clubs performace throughout the year positvely correlates to the goal difference of the club because at the end of the day the team that scores the most while allowing the least amount of goals will always be the better side. The correlation between the total team points and goal difference came out to a staggering 0.9908.
+
+
+```{r, warning=FALSE, message=FALSE}
+# URL for the data. 
+URL <- "https://datahub.io/sports-data/english-premier-league/r/0.html"
+# load data and data dictionary.
+prem.dat <- read_csv("EPL1819.csv")
+prem.dict <- read.delim("EPLdictionary.txt", sep = "=")
+
+# Look at the data types. 
+glimpse(prem.dat)
+
+# Check for missing data.
+sum(is.na(prem.dat))
+
+# Home vs Away
+sum(prem.dat$FTHG)
+sum(prem.dat$FTAG)
+
+# Get number of games where home team drew, won and lost against the away team.
+nrow(prem.dat[prem.dat$FTHG == prem.dat$FTAG,])
+nrow(prem.dat[prem.dat$FTHG > prem.dat$FTAG,])
+nrow(prem.dat[prem.dat$FTHG < prem.dat$FTAG,])
+
+# Get the percent of times where half time result was the same as the full time result.
+nrow(prem.dat[prem.dat$FTR == prem.dat$HTR,]) / 380
+cor(as.numeric(as.factor(prem.dat$FTR)), as.numeric(as.factor(prem.dat$HTR)))
+
+# distribution of home goals vs away goals 
+prem.dat %>%
+  pivot_longer(cols = c('FTHG', 'FTAG'), names_to = "HA", values_to = "Goals") %>%
+  ggplot(aes(x = Goals, fill = HA)) + 
+    geom_density(alpha = 0.2) +
+    labs(xlab = "Goals Scored", ylab = "Density", title = "Density of Goals Scored") +
+    scale_fill_discrete(name = "Side", labels = c("Away Team", "Home Team"))
+
+# Use home goals and home team shots too look at shots to goals and wins to losses graph.
+ggplot(data = prem.dat, aes(x = FTHG, y = HS, shape = FTR)) +
+  geom_point(aes(color = FTR))
+
+# Create a data frame of goals scored per team home and away.
+TeamGoals.dat <- data.frame(Teams = unique(prem.dat$HomeTeam))
+for(i in 1:nrow(TeamGoals.dat)) {
+  TeamGoals.dat$HG[i] <- sum(prem.dat$FTHG[which(prem.dat$HomeTeam == TeamGoals.dat$Teams[i])])
+  TeamGoals.dat$HA[i] <- sum(prem.dat$FTAG[which(prem.dat$HomeTeam == TeamGoals.dat$Teams[i])])
+  TeamGoals.dat$AG[i] <- sum(prem.dat$FTAG[which(prem.dat$AwayTeam == TeamGoals.dat$Teams[i])])
+  TeamGoals.dat$AA[i] <- sum(prem.dat$FTHG[which(prem.dat$AwayTeam == TeamGoals.dat$Teams[i])])
+  # Find the end of season points for each team as well. 
+  TeamGoals.dat$Hpoints[i] <- sum(prem.dat$HomeTeam == TeamGoals.dat$Teams[i] & prem.dat$FTR == "H")
+  TeamGoals.dat$Apoints[i] <- sum(prem.dat$AwayTeam == TeamGoals.dat$Teams[i] & prem.dat$FTR == "A")
+  TeamGoals.dat$Dpoints[i] <- sum((prem.dat$HomeTeam == TeamGoals.dat$Teams[i] | prem.dat$AwayTeam == TeamGoals.dat$Teams[i]) & prem.dat$FTR == "D")
+  TeamGoals.dat$TotalPoints <- (3 * (TeamGoals.dat$Hpoints + TeamGoals.dat$Apoints)) + TeamGoals.dat$Dpoints
+}
+
+
+TeamGoals.dat <- TeamGoals.dat %>%
+  mutate(TotalScored = HG + AG) %>%
+  mutate(TotalAllowed = HA + AA) %>%
+  mutate(GoalDifference = TotalScored - TotalAllowed) %>%
+  select(-HG, -HA, -AG, -AA, -Hpoints, -Apoints, -Dpoints)
+
+
+# View goal difference to goal difference to standings.
+ggplot(TeamGoals.dat, aes(x = TotalPoints, y = GoalDifference, color = TotalPoints)) +
+  geom_point() +
+  geom_text_repel(label = TeamGoals.dat$Teams) +
+  labs(x = "Total Points", y = "Goal Difference", title = "Goals Scored to Season Points") +
+  geom_smooth(method = lm, se = FALSE)
+
+cor(TeamGoals.dat$TotalPoints, TeamGoals.dat$GoalDifference)
+  
+```
+
+
+### **Data Preparation**
+So firstly we started by removing some features we definitely will not use. This includes the division, since it was all the same value anyways. The referee is also another feature that might have a sort of input on the result of the match, however, it isn't something that would affect a match as heavily as the other features. Full time home and full time away goals we removed because if it was left in, the importance of those two features would take over the model since it describes our desired output too well. 
+
+```{r}
+prem.dat <- prem.dat[,1:23] %>%
+  # Remove features
+  select(-Div, -Referee, -FTHG, -FTAG) %>%
+  mutate(Week = ceiling(1:380 / 10)) %>%
+  # Encode home wins as a 1 and home losses (away wins) and draws as 0
+  mutate(FTR = ifelse(FTR == "H", 1, 0)) %>%
+  mutate(HTR = ifelse(HTR == "H", 1, 0))
+
+prem.dat$FTR <- as.numeric(prem.dat$FTR)
+prem.dat$HTR <- as.numeric(prem.dat$HTR)
+  
+prem.dat$HomeTeam <- as.factor(prem.dat$HomeTeam)
+prem.dat$AwayTeam <- as.factor(prem.dat$AwayTeam)
+
+
+# Split the data, we will predict the last 8 matches of the season.
+train.prem <- prem.dat[1:300,]
+test.prem <- prem.dat[301:380,]
+label.test <- test.prem$FTR
+```
+
+
+### **Modeling**
+We will be using a random forest classifier as our choice of machine learning model. Looking at the correlations of some of the values we can see that none of the values correlate strongly with the full time result.
+
+We want to predict the full time result of the match using the week, the two teams playing, the half time result along with the half time score and the half time shots and targets. We won't be using any full time stats since we previously removed those values. 
+```{r}
+# View numerical correlations.
+prem.dat %>% select(FTR, HTHG, HTAG, HTR, HST, AST, HS, AS, HC, AC, HF, AF) %>% cor()
+rf.model <- randomForest(as.factor(FTR) ~ Week + HomeTeam + AwayTeam + HTHG + HTAG + HTR + HST + AST, proximity = TRUE, data = train.prem)
+```
+
+
+### **Evaluation**
+Evaluating our model, we can see that in the first run we correctly predicted 34 wins out of the 37 total wins in the data. However, we only predicted 26 correct matches that did not end in a win out of our 43 matches that did not end in a win. 
+Therefore in model 1 we had : 
+Accuracy = 60/80 (75.000%)
+Precision = 34/37 (91.892%)
+Recall = 34/51 (66.667%)
+
+We created a second model using the same predictors however adding two more, home shots and away shots. Previously we only used the shots on target since it had a stronger correlation that shots, however, now we will add them as well to try and improve the accuracy. We also increased the number of trees as well from the default 500 to 2500. 
+
+In model 2 we had : 
+Accuracy : 62/80 (77.500%)
+Precision : 34/37 (91.892%)
+Recall : 34/49 (69.388%)
+
+Overall model 2 was more accurate and had a better recall percentage as well. It correctly classified two more false negatives than model 1. 
+```{r}
+rf.model
+rf.pred <- predict(rf.model, newdata = test.prem, type= "class")
+CrossTable(x = label.test, y = rf.pred, prop.chisq = FALSE)
+
+# Add home team shots and away team shots as predictors
+rf.model2 <- randomForest(as.factor(FTR) ~ Week + HomeTeam + AwayTeam + HTHG + HTAG + HTR + HST + AST + HS + AS, proximity = TRUE, ntree = 2500, data = train.prem)
+rf.pred2 <- predict(rf.model2, newdata = test.prem, type = "class")
+CrossTable(x = label.test, y = rf.pred2, prop.chisq = FALSE)
+```
+
+### Conclusion
+Ultimately, soccer is a highly erratic sport where a team that is dominating possesion, shots on target, shots. corners and many other statistics can make a mistake or two and lose their advantage and in some cases even lose the game. This is what makes the sport of soccer as popular and wildly entertaining as it is. Our random forest model that we built was about 75% accurate in predicting whether or not the home team won or not in the last 8 games of the season. Our second model was slightly more accurate than the first given that it had 2000 more trees added to it and used two more predictors, home shots and away shots. Our precision was very high as well, meaning that for all the won games that did occur we were about 92% accurate in actually predicting those correctly. 
